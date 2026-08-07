@@ -3,7 +3,6 @@
 **/wget-log
 **/_build/
 **/*.ckpt
-**/outputs
 **/*.tar.gz
 **/playground
 **/wandb
@@ -129,5 +128,4 @@ ENV/
 # local logs
 logs
 log
-outputs
 .history
