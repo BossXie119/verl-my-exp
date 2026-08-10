@@ -18,7 +18,7 @@ Metrics related to the PPO trainer.
 import logging
 from collections import defaultdict
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -789,3 +789,61 @@ def compute_group_advantage_metrics(batch: DataProto) -> dict[str, Any]:
         "critic/advantages/group_zero_var_ratio": zero_var_groups / len(group_stds),
         "critic/advantages/group_size_mean": float(np.mean(group_sizes)),
     }
+
+
+def compute_length_quality_metrics(
+    batch: DataProto,
+    reward_extra_infos_dict: dict[str, list[Any]],
+    len_target: Optional[int] = None,
+) -> dict[str, Any]:
+    """Length statistics split by correctness, for "shorten without losing accuracy" runs.
+
+    ``compute_data_metrics`` already reports the overall response-length mean/max/min and
+    clip ratio. What it cannot tell you is *which* responses got shorter: a drop in the
+    mean is only good news if it comes from the correct ones. These metrics separate the
+    two populations using the per-sample ``acc`` flag produced by the reward function.
+
+    Args:
+        batch: batch containing ``responses`` and ``attention_mask``.
+        reward_extra_infos_dict: per-sample reward-extra fields; requires ``acc``.
+        len_target: soft length budget used by the reward's length penalty. When given,
+            ``quality/short_and_correct_ratio`` is reported as a single headline metric.
+
+    Returns (empty dict when ``acc`` is missing or its length disagrees with the batch):
+        - ``length/correct_mean`` / ``length/incorrect_mean``
+        - ``length/p50`` / ``length/p90``: the mean is skewed by the long tail
+        - ``length/truncated_ratio``: fraction of responses hitting ``max_response_length``
+        - ``length/truncated_acc``: accuracy among truncated responses
+        - ``quality/short_and_correct_ratio``: correct and within ``len_target``
+    """
+    acc_vals = reward_extra_infos_dict.get("acc")
+    if acc_vals is None or len(acc_vals) == 0:
+        return {}
+
+    max_response_length = batch.batch["responses"].shape[-1]
+    response_mask = batch.batch["attention_mask"][:, -max_response_length:]
+    response_length = response_mask.sum(-1).float().cpu().numpy()
+
+    acc = np.asarray(acc_vals).astype(bool)
+    if acc.shape[0] != response_length.shape[0]:
+        return {}
+
+    truncated = response_length >= max_response_length
+
+    metrics: dict[str, Any] = {
+        "length/p50": float(np.percentile(response_length, 50)),
+        "length/p90": float(np.percentile(response_length, 90)),
+        "length/truncated_ratio": float(np.mean(truncated)),
+    }
+
+    if acc.any():
+        metrics["length/correct_mean"] = float(np.mean(response_length[acc]))
+    if (~acc).any():
+        metrics["length/incorrect_mean"] = float(np.mean(response_length[~acc]))
+    if truncated.any():
+        metrics["length/truncated_acc"] = float(np.mean(acc[truncated]))
+
+    if len_target is not None and len_target > 0:
+        metrics["quality/short_and_correct_ratio"] = float(np.mean(acc & (response_length <= len_target)))
+
+    return metrics

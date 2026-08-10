@@ -99,6 +99,12 @@ class DAPORewardManager(AbstractRewardManager):
 
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
+            # Expose response length so custom reward functions can do length-aware shaping
+            # (e.g. penalize overly long but correct answers). The reward manager is the only
+            # place where the token-level length is available.
+            extra_info["response_length"] = int(valid_response_length)
+            extra_info["max_response_length"] = int(response_ids.shape[-1])
+
             result = self.compute_score(
                 data_source=data_source,
                 solution_str=response_str,

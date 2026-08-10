@@ -44,6 +44,7 @@ from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_group_advantage_metrics,
+    compute_length_quality_metrics,
     compute_reward_extra_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -1742,6 +1743,16 @@ class RayPPOTrainer:
                 metrics.update(compute_reward_extra_metrics(reward_extra_infos_dict))
                 # per-group advantage variance (GRPO groups share the same uid)
                 metrics.update(compute_group_advantage_metrics(batch))
+                # response length split by correctness (length/correct_mean vs incorrect_mean)
+                custom_reward_cfg = self.config.reward.get("custom_reward_function") or {}
+                custom_reward_kwargs = custom_reward_cfg.get("reward_kwargs") or {}
+                metrics.update(
+                    compute_length_quality_metrics(
+                        batch=batch,
+                        reward_extra_infos_dict=reward_extra_infos_dict,
+                        len_target=custom_reward_kwargs.get("len_target", None),
+                    )
+                )
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
