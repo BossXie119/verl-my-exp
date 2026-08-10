@@ -700,3 +700,92 @@ def process_validation_metrics(
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
     return data_src2var2metric2val
+
+
+def compute_reward_extra_metrics(reward_extra_infos_dict: dict[str, list[Any]]) -> dict[str, Any]:
+    """Aggregate per-sample reward-extra fields (e.g. ``acc``, ``format``) into scalars.
+
+    Only numeric/bool variables are aggregated; string variables (e.g. ``pred``) are skipped.
+    Produces ``reward/{var}/mean`` and ``reward/{var}/std`` for each eligible variable.
+
+    Args:
+        reward_extra_infos_dict: Mapping from variable name to per-sample values, as
+            produced by the reward manager (see ``verl.workers.reward_manager.dapo``).
+
+    Returns:
+        A flat metrics dict, e.g. ``reward/acc/mean``, ``reward/format/mean``.
+    """
+    metrics: dict[str, Any] = {}
+    for var, vals in reward_extra_infos_dict.items():
+        # vals may be a list or a numpy array; len() works for both without
+        # triggering the ambiguous-truth-value error on multi-element arrays.
+        if len(vals) == 0 or isinstance(vals[0], str):
+            continue
+        try:
+            arr = np.asarray(vals, dtype=np.float32)
+        except (TypeError, ValueError):
+            continue
+        if arr.ndim != 1:
+            continue
+        metrics[f"reward/{var}/mean"] = float(np.mean(arr))
+        metrics[f"reward/{var}/std"] = float(np.std(arr))
+    return metrics
+
+
+def compute_group_advantage_metrics(batch: DataProto) -> dict[str, Any]:
+    """Per-group statistics of GRPO advantages.
+
+    Groups are identified by ``batch.non_tensor_batch["uid"]``, the same uid used by
+    ``compute_grpo_outcome_advantage`` (one uid per prompt across its ``n`` responses).
+    For each group we compute the within-group std of per-sample advantages; a zero
+    within-group std means every response of that prompt got the same score, i.e. the
+    group carries no learning signal.
+
+    Returns (empty dict when ``uid``/``advantages`` are unavailable):
+        - ``critic/advantages/group_std_mean``: mean over groups of the within-group std
+        - ``critic/advantages/group_std_min`` / ``group_std_max``
+        - ``critic/advantages/group_zero_var_ratio``: fraction of groups (size >= 2) with
+          std < 1e-6, i.e. no intra-group learning signal
+        - ``critic/advantages/group_size_mean``: mean number of responses per group
+    """
+    uid = batch.non_tensor_batch.get("uid")
+    advantages = batch.batch.get("advantages")
+    response_mask = batch.batch.get("response_mask")
+    if uid is None or advantages is None or response_mask is None:
+        return {}
+
+    uid = np.asarray(uid)
+    adv_t = advantages.detach().float()
+    mask_t = response_mask.bool()
+
+    # Per-sample advantage = mean over valid response tokens (constant across tokens for
+    # GRPO outcome advantages).
+    denom = mask_t.sum(-1).clamp(min=1)
+    sample_adv = (adv_t * mask_t).sum(-1) / denom
+    sample_adv = sample_adv.cpu().numpy()
+
+    groups: dict[Any, list[float]] = {}
+    for u, a in zip(uid, sample_adv, strict=True):
+        groups.setdefault(u, []).append(a)
+
+    group_stds: list[float] = []
+    group_sizes: list[int] = []
+    zero_var_groups = 0
+    for vals in groups.values():
+        group_sizes.append(len(vals))
+        if len(vals) >= 2:
+            std = float(np.std(vals))
+            group_stds.append(std)
+            if std < 1e-6:
+                zero_var_groups += 1
+
+    if not group_stds:
+        return {}
+
+    return {
+        "critic/advantages/group_std_mean": float(np.mean(group_stds)),
+        "critic/advantages/group_std_min": float(np.min(group_stds)),
+        "critic/advantages/group_std_max": float(np.max(group_stds)),
+        "critic/advantages/group_zero_var_ratio": zero_var_groups / len(group_stds),
+        "critic/advantages/group_size_mean": float(np.mean(group_sizes)),
+    }

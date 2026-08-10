@@ -43,6 +43,8 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
+    compute_group_advantage_metrics,
+    compute_reward_extra_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
@@ -525,6 +527,8 @@ class RayPPOTrainer:
             rollout_data_dir (str): Directory path to save the rollout data
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+            max_samples = self.config.trainer.get("rollout_dump_max_samples", None)
+
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
@@ -538,6 +542,13 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+
+            if max_samples is not None and max_samples > 0:
+                inputs = inputs[:max_samples]
+                outputs = outputs[:max_samples]
+                scores = scores[:max_samples]
+                sample_gts = sample_gts[:max_samples]
+                reward_extra_infos_to_dump = {k: list(v)[:max_samples] for k, v in reward_extra_infos_to_dump.items()}
 
             self._dump_generations(
                 inputs=inputs,
@@ -698,12 +709,21 @@ class RayPPOTrainer:
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            max_samples = self.config.trainer.get("rollout_dump_max_samples", None)
+            dump_inputs, dump_outputs, dump_gts, dump_scores = sample_inputs, sample_outputs, sample_gts, sample_scores
+            dump_reward_extra = reward_extra_infos_dict
+            if max_samples is not None and max_samples > 0:
+                dump_inputs = dump_inputs[:max_samples]
+                dump_outputs = dump_outputs[:max_samples]
+                dump_gts = dump_gts[:max_samples]
+                dump_scores = dump_scores[:max_samples]
+                dump_reward_extra = {k: list(v)[:max_samples] for k, v in dump_reward_extra.items()}
             self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                gts=sample_gts,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
+                inputs=dump_inputs,
+                outputs=dump_outputs,
+                gts=dump_gts,
+                scores=dump_scores,
+                reward_extra_infos_dict=dump_reward_extra,
                 dump_path=val_data_dir,
             )
 
@@ -1718,6 +1738,10 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # per-sample reward-extra metrics (e.g. reward/format/mean, reward/acc/mean)
+                metrics.update(compute_reward_extra_metrics(reward_extra_infos_dict))
+                # per-group advantage variance (GRPO groups share the same uid)
+                metrics.update(compute_group_advantage_metrics(batch))
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
