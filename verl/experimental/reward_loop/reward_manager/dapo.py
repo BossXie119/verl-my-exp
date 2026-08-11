@@ -61,6 +61,12 @@ class DAPORewardManager(RewardManagerBase):
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})
 
+        # Expose response length so custom reward functions can do length-aware shaping
+        # (e.g. penalize overly long but correct answers). The reward manager is the only
+        # place where the token-level length is available.
+        extra_info["response_length"] = int(valid_response_length)
+        extra_info["max_response_length"] = int(response_length)
+
         response_str = await self.loop.run_in_executor(
             None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         )
