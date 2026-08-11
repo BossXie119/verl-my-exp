@@ -64,8 +64,12 @@ class DAPORewardManager(RewardManagerBase):
         # Expose response length so custom reward functions can do length-aware shaping
         # (e.g. penalize overly long but correct answers). The reward manager is the only
         # place where the token-level length is available.
+        # NOTE: in this async path `responses` is a single, unpadded sequence, so
+        # `response_ids.shape[-1]` is the actual generated length, not the configured cap.
+        # Use `self.max_resp_len` for the truncation threshold; fall back to the tensor
+        # width only when it is unavailable.
         extra_info["response_length"] = int(valid_response_length)
-        extra_info["max_response_length"] = int(response_length)
+        extra_info["max_response_length"] = int(self.max_resp_len) if self.max_resp_len else int(response_length)
 
         response_str = await self.loop.run_in_executor(
             None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
